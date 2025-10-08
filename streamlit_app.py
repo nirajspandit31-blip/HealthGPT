@@ -1,117 +1,125 @@
 import streamlit as st
-import requests
+from supabase import create_client, Client
+import time
+import os
+import soundfile as sf
+from io import BytesIO
+import wave
+import json
+from vosk import Model, KaldiRecognizer
 
-API_BASE = "http://127.0.0.1:5000/api"  # Flask API base URL
+# ---------------- Streamlit Page Config ----------------
+st.set_page_config(page_title="HealthGPT - Your Pocket Doctor", page_icon="🩺", layout="wide")
 
-st.set_page_config(page_title="Health GPT Frontend", layout="wide")
-st.title("💊 Health GPT Dashboard")
+# ---------------- Supabase Initialization ----------------
+SUPABASE_URL = "https://jnhfadolvhrwpnpjnwqw.supabase.co"
+SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImpuaGZhZG9sdmhyd3BucGpud3F3Iiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc1OTU4NTkwMiwiZXhwIjoyMDc1MTYxOTAyfQ.I1Mdj6Sfej90o2zUEWN1qZwlX7MpzU8hdtQbhbMQnow"
 
-menu = ["Home", "Create Prompt", "View Prompts", "Audio Transcription"]
-choice = st.sidebar.selectbox("Menu", menu)
+supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+BUCKET_NAME = "audio-stream"
 
-# --------------------- Home ---------------------
-if choice == "Home":
-    st.subheader("Welcome to Health GPT Dashboard")
-    st.markdown("""
-        - Use **Create Prompt** to manually add user symptoms.
-        - Use **View Prompts** to see all stored prompts and manage them.
-        - Use **Audio Transcription** to upload audio and get Gemini transcription + prescription.
-    """)
+# ---------------- Sidebar ----------------
+st.sidebar.title("⚙️ Settings")
+refresh_rate = st.sidebar.slider("Refresh every (seconds)", 1, 10, 3)
+st.sidebar.info("This app listens for real-time audio uploads from ESP32 → Supabase → Vosk → HealthGPT.")
 
-# --------------------- Create Prompt ---------------------
-elif choice == "Create Prompt":
-    st.subheader("Create Prompt Record")
-    userPrompt = st.text_area("User Prompt / Symptoms")
-    medicinesName = st.text_input("Medicine Names (comma separated)")
-    symptoms_input = st.text_area("Symptoms (one per line)")
-    symptoms = [
-        {"name": s.strip(), "severity": "unknown", "onsetDate": None, "durationDays": None, "notes": ""}
-        for s in symptoms_input.splitlines() if s.strip()
-    ]
+# ---------------- Header ----------------
+st.markdown(
+    """
+    <h1 style='text-align:center; color:#2E86C1;'>🩺 HealthGPT - Your Pocket Doctor</h1>
+    <p style='text-align:center; color:gray;'>AI-powered real-time symptom and medication analysis</p>
+    """,
+    unsafe_allow_html=True,
+)
 
-    if st.button("Submit Prompt"):
-        payload = {
-            "userPrompt": userPrompt,
-            "medicinesName": medicinesName,
-            "symptoms": symptoms
-        }
-        try:
-            resp = requests.post(f"{API_BASE}/prompts", json=payload)
-            if resp.ok:
-                st.success("Prompt saved successfully!")
-                try:
-                    st.json(resp.json())
-                except Exception:
-                    st.text(resp.text)
-            else:
-                try:
-                    st.error(resp.json())
-                except Exception:
-                    st.error(f"Error {resp.status_code}: {resp.text}")
-        except Exception as e:
-            st.error(f"Request failed: {str(e)}")
+# ---------------- Load Vosk Model ----------------
+with st.spinner("🔄 Loading Vosk speech recognition model..."):
+    vosk_model = Model(r"F:\Desktop\app - Copy\models\vosk-model-small-en-us-0.15")
+st.success("✅ Vosk model loaded successfully!")
 
-# --------------------- View Prompts ---------------------
-elif choice == "View Prompts":
-    st.subheader("View All Prompts")
+# ---------------- Helper Functions ----------------
+def raw_to_wav(raw_bytes):
+    """Convert raw PCM bytes to WAV format."""
+    audio_array = []
+    for i in range(0, len(raw_bytes), 2):  # 16-bit PCM
+        val = int.from_bytes(raw_bytes[i:i+2], byteorder="little", signed=True)
+        audio_array.append(val)
+    wav_io = BytesIO()
+    sf.write(wav_io, audio_array, 16000, format="WAV")
+    wav_io.seek(0)
+    return wav_io
+
+def transcribe_vosk(wav_file):
+    """Transcribe WAV audio to text using Vosk."""
+    wf = wave.open(wav_file, "rb")
+    rec = KaldiRecognizer(vosk_model, wf.getframerate())
+    text = ""
+    while True:
+        data = wf.readframes(4000)
+        if len(data) == 0:
+            break
+        if rec.AcceptWaveform(data):
+            res = json.loads(rec.Result())
+            text += " " + res.get("text", "")
+    res = json.loads(rec.FinalResult())
+    text += " " + res.get("text", "")
+    return text.strip()
+
+# ---------------- UI Placeholders ----------------
+status_placeholder = st.empty()
+audio_col, text_col, ai_col = st.columns([1, 1, 1])
+processed_files = set()
+
+# ---------------- Main Loop ----------------
+status_placeholder.info("⏳ Waiting for new audio uploads...")
+
+while True:
     try:
-        resp = requests.get(f"{API_BASE}/prompts")
-        if resp.ok:
-            try:
-                records = resp.json()["data"]
-            except Exception:
-                st.error("Invalid JSON response from API")
-                records = []
-            for r in records:
-                with st.expander(f"Prompt ID: {r.get('_id', 'N/A')}"):
-                    st.markdown(f"**User Prompt:** {r.get('userPrompt', '')}")
-                    st.markdown(f"**Medicines:** {r.get('medicinesName', '')}")
-                    st.markdown("**Symptoms:**")
-                    for s in r.get("symptoms", []):
-                        st.markdown(f"- {s.get('name', '')} (Severity: {s.get('severity', 'unknown')})")
+        # List .raw files in Supabase bucket
+        resp = supabase.storage.from_(BUCKET_NAME).list(path="")
+        blobs = [f["name"] for f in resp if f["name"].endswith(".raw")]
+        new_blobs = [b for b in blobs if b not in processed_files]
 
-                    # Delete button
-                    if st.button(f"Delete {r.get('_id', '')}"):
-                        try:
-                            del_resp = requests.delete(f"{API_BASE}/prompts/{r['_id']}")
-                            if del_resp.ok:
-                                st.success("Deleted successfully!")
-                            else:
-                                try:
-                                    st.error(del_resp.json())
-                                except Exception:
-                                    st.error(f"Delete failed: {del_resp.text}")
-                        except Exception as e:
-                            st.error(f"Request failed: {str(e)}")
+        if not new_blobs:
+            status_placeholder.info("👂 Listening for new audio uploads...")
         else:
-            try:
-                st.error(resp.json())
-            except Exception:
-                st.error(f"Error {resp.status_code}: {resp.text}")
-    except Exception as e:
-        st.error(f"Request failed: {str(e)}")
+            for blob_name in new_blobs:
+                try:
+                    status_placeholder.warning(f"🎙 Processing: {blob_name}")
 
-# --------------------- Audio Transcription ---------------------
-elif choice == "Audio Transcription":
-    st.subheader("Upload Audio for Gemini Transcription & Prescription")
-    audio_file = st.file_uploader("Choose MP3 file", type=["mp3"])
-    if audio_file is not None:
-        try:
-            files = {"audio": (audio_file.name, audio_file, "audio/mpeg")}
-            resp = requests.post(f"{API_BASE}/audio-transcribe", files=files)
-            if resp.ok:
-                try:
-                    data = resp.json()["data"]
-                    st.success("Transcription & Prescription received!")
-                    st.markdown("**Gemini Output:**")
-                    st.text(data.get("output", ""))
-                    st.markdown(f"**Saved Record ID:** {data.get('record_id', '')}")
-                except Exception:
-                    st.text(resp.text)
-            else:
-                try:
-                    st.error(resp.json())
-                except Exception:
-                    st.error(f"Error {resp.status_code}: {resp.text}")
-        except Exception as e:
-            st.error(f"Request failed: {str(e)}")
+                    # Download raw file from Supabase
+                    raw_bytes = supabase.storage.from_(BUCKET_NAME).download(blob_name)
+
+                    # Convert -> WAV
+                    wav_file = raw_to_wav(raw_bytes)
+
+                    # Audio Column
+                    audio_col.markdown("### 🔊 Recorded Audio")
+                    audio_col.audio(wav_file, format="audio/wav")
+
+                    # Transcribe
+                    text_col.markdown("### 🗣 Transcribed Text")
+                    transcribed_text = transcribe_vosk(wav_file)
+                    text_col.success(transcribed_text if transcribed_text else "No speech detected.")
+
+                    # AI Analysis
+                    ai_col.markdown("### 🤖 HealthGPT Analysis")
+                    try:
+                        from your_healthgpt_module import analyze_text_with_gemini
+                        analysis = analyze_text_with_gemini(transcribed_text)
+                        ai_col.info(f"**Symptoms:** {', '.join(analysis.get('symptoms', []))}")
+                        ai_col.success(f"**Medications:** {', '.join(analysis.get('medications', []))}")
+                    except Exception as e:
+                        ai_col.error(f"Gemini analysis failed: {e}")
+
+                    processed_files.add(blob_name)
+                    status_placeholder.success(f"✅ Processed {blob_name} successfully!")
+
+                except Exception as e:
+                    status_placeholder.error(f"Error processing {blob_name}: {e}")
+
+        time.sleep(refresh_rate)
+
+    except Exception as e:
+        status_placeholder.error(f"Main loop error: {e}")
+        time.sleep(5)
