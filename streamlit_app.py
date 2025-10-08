@@ -1,12 +1,12 @@
 import streamlit as st
 from supabase import create_client, Client
 import time
-import os
-import soundfile as sf
+import numpy as np
 from io import BytesIO
 import wave
 import json
 from vosk import Model, KaldiRecognizer
+import soundfile as sf
 
 # ---------------- Streamlit Page Config ----------------
 st.set_page_config(page_title="HealthGPT - Your Pocket Doctor", page_icon="🩺", layout="wide")
@@ -14,7 +14,6 @@ st.set_page_config(page_title="HealthGPT - Your Pocket Doctor", page_icon="🩺"
 # ---------------- Supabase Initialization ----------------
 SUPABASE_URL = "https://jnhfadolvhrwpnpjnwqw.supabase.co"
 SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImpuaGZhZG9sdmhyd3BucGpud3F3Iiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc1OTU4NTkwMiwiZXhwIjoyMDc1MTYxOTAyfQ.I1Mdj6Sfej90o2zUEWN1qZwlX7MpzU8hdtQbhbMQnow"
-
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 BUCKET_NAME = "audio-stream"
 
@@ -39,11 +38,9 @@ st.success("✅ Vosk model loaded successfully!")
 
 # ---------------- Helper Functions ----------------
 def raw_to_wav(raw_bytes):
-    """Convert raw PCM bytes to WAV format."""
-    audio_array = []
-    for i in range(0, len(raw_bytes), 2):  # 16-bit PCM
-        val = int.from_bytes(raw_bytes[i:i+2], byteorder="little", signed=True)
-        audio_array.append(val)
+    """Convert raw PCM bytes to WAV format (int16)."""
+    # Convert bytes to numpy array with dtype int16
+    audio_array = np.frombuffer(raw_bytes, dtype=np.int16)
     wav_io = BytesIO()
     sf.write(wav_io, audio_array, 16000, format="WAV")
     wav_io.seek(0)
@@ -102,7 +99,7 @@ while True:
                     transcribed_text = transcribe_vosk(wav_file)
                     text_col.success(transcribed_text if transcribed_text else "No speech detected.")
 
-                    # AI Analysis
+                    # AI Analysis (replace with your own module)
                     ai_col.markdown("### 🤖 HealthGPT Analysis")
                     try:
                         from your_healthgpt_module import analyze_text_with_gemini
